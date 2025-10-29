@@ -104,12 +104,16 @@ with tabs[0]:
                 
                 # Convert findings to DataFrame
                 df_full = pd.DataFrame(findings)
-                st.session_state.mistakes_df = df_full  # Keep full DataFrame for processing
                 
-                # Create display version without unwanted columns
-                desired_columns = ['type', 'section', 'found', 'expected', 'snippet', 'suggested_fix']
-                available_columns = [col for col in desired_columns if col in df_full.columns]
-                df_display = df_full[available_columns]
+                if not df_full.empty:
+                    preferred_order = ['type', 'section', 'found', 'expected', 'snippet', 'suggested_fix',
+                                       'paragraph_indices', 'pages', 'suggested_action']
+                    ordered_columns = [col for col in preferred_order if col in df_full.columns]
+                    ordered_columns += [col for col in df_full.columns if col not in ordered_columns]
+                    df_full = df_full[ordered_columns]
+                st.session_state.mistakes_df = df_full
+                
+                df_display = st.session_state.mistakes_df
                 
                 # Save Excel report (using display version)
                 output = io.BytesIO()
@@ -181,10 +185,7 @@ with tabs[1]:
         st.subheader("📋 Detected Formatting Issues")
         
         if st.session_state.mistakes_df is not None:
-            # Create display version without unwanted columns
-            desired_columns = ['type', 'section', 'found', 'expected', 'snippet', 'suggested_fix']
-            available_columns = [col for col in desired_columns if col in st.session_state.mistakes_df.columns]
-            df_display = st.session_state.mistakes_df[available_columns]
+            df_display = st.session_state.mistakes_df
             st.dataframe(df_display, use_container_width=True)
             
             # Show summary stats
@@ -192,7 +193,7 @@ with tabs[1]:
             with col1:
                 st.metric("Total Issues", len(df_display))
             with col2:
-                issue_types = df_display['type'].nunique()
+                issue_types = df_display['type'].nunique() if 'type' in df_display.columns else 0
                 st.metric("Issue Types", issue_types)
             with col3:
                 st.metric("Detection Accuracy", "75-81%")
@@ -251,10 +252,7 @@ with tabs[2]:
         
         # Show detected issues
         st.subheader("📋 Issues to Process")
-        # Create display version without unwanted columns
-        desired_columns = ['type', 'section', 'found', 'expected', 'snippet', 'suggested_fix']
-        available_columns = [col for col in desired_columns if col in st.session_state.mistakes_df.columns]
-        df_display = st.session_state.mistakes_df[available_columns]
+        df_display = st.session_state.mistakes_df
         st.dataframe(df_display, use_container_width=True)
         
         # Processing mode selection
