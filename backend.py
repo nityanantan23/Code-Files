@@ -367,6 +367,21 @@ def analyze_documents(template_file, manuscript_file):
     # Get XML previews for display
     template_preview = get_xml_preview(template_xml)
     manuscript_preview = get_xml_preview(manuscript_xml)
+
+    # Emit previews to the console for visibility during analysis
+    if template_preview:
+        print("\n=== TEMPLATE XML PREVIEW (from analyze_documents) ===")
+        print(template_preview)
+    else:
+        print("\n=== TEMPLATE XML PREVIEW (from analyze_documents) ===")
+        print("No preview available")
+
+    if manuscript_preview:
+        print("\n=== MANUSCRIPT XML PREVIEW (from analyze_documents) ===")
+        print(manuscript_preview)
+    else:
+        print("\n=== MANUSCRIPT XML PREVIEW (from analyze_documents) ===")
+        print("No preview available")
     
     # Extract paragraphs from both
     template_paragraphs = extract_paragraphs_from_xml(template_xml)
@@ -818,12 +833,60 @@ def apply_single_correction(paragraph, mistake):
     
     return False
 
+def summarize_mistakes_df(mistakes_df, max_rows=5):
+    """Create a lightweight preview of mistakes_df for debugging"""
+    summary = {
+        'row_count': 0,
+        'columns': [],
+        'sample_rows': [],
+    }
+    
+    if mistakes_df is None:
+        summary['note'] = "mistakes_df is None"
+        return summary
+    
+    try:
+        summary['row_count'] = len(mistakes_df)
+        summary['columns'] = list(getattr(mistakes_df, 'columns', []))
+        
+        if summary['row_count'] > 0:
+            head_df = mistakes_df.head(max_rows)
+            try:
+                head_df = head_df.fillna("")
+            except Exception:
+                pass
+            summary['sample_rows'] = head_df.to_dict(orient='records')
+    except Exception as err:
+        summary['note'] = f"Could not summarize mistakes_df: {err}"
+    
+    return summary
+
+
+def log_mistakes_summary(summary):
+    """Print summary details for debugging"""
+    row_count = summary.get('row_count', 0)
+    columns = summary.get('columns') or []
+    note = summary.get('note')
+    
+    column_list = ", ".join(columns) if columns else "None"
+    print(f"[Highlight Preview] mistakes_df rows: {row_count} | columns: {column_list}")
+    
+    if note:
+        print(f"[Highlight Preview] Note: {note}")
+    
+    for idx, row in enumerate(summary.get('sample_rows', []), start=1):
+        print(f"[Highlight Preview] Row {idx}: {row}")
+
+
 def highlight_mistakes(template_file, manuscript_file, mistakes_df):
-    """Highlight mistakes in the manuscript"""
+    """Highlight mistakes in the manuscript and emit verbose debug info"""
     try:
         from docx import Document
     except ImportError:
         raise ImportError("python-docx required for highlighting")
+    
+    mistakes_summary = summarize_mistakes_df(mistakes_df)
+    log_mistakes_summary(mistakes_summary)
     
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_manuscript:
@@ -833,20 +896,63 @@ def highlight_mistakes(template_file, manuscript_file, mistakes_df):
 
         doc = Document(manuscript_path)
         
-        # Collect paragraphs to highlight
-        paragraphs_to_highlight = set()
-        for _, mistake in mistakes_df.iterrows():
-            para_indices = mistake['paragraph_indices']
-            if isinstance(para_indices, list):
-                for idx in para_indices:
-                    if idx < len(doc.paragraphs):
-                        paragraphs_to_highlight.add(idx)
+        # Collect paragraphs to highlight + debug context
+        highlight_map = defaultdict(list)
+        debug_data = {
+            'summary': mistakes_summary,
+            'paragraphs': []
+        }
+        if mistakes_df is not None and hasattr(mistakes_df, 'iterrows'):
+            for _, mistake in mistakes_df.iterrows():
+                para_indices = mistake.get('paragraph_indices')
+                if isinstance(para_indices, list):
+                    for idx in para_indices:
+                        if 0 <= idx < len(doc.paragraphs):
+                            highlight_map[idx].append({
+                                'type': mistake.get('type'),
+                                'section': mistake.get('section'),
+                                'expected': mistake.get('expected'),
+                                'found': mistake.get('found'),
+                                'suggested_fix': mistake.get('suggested_fix'),
+                                'snippet': mistake.get('snippet')
+                            })
         
-        # Apply highlighting
-        for para_idx in paragraphs_to_highlight:
+        if not highlight_map:
+            print("[Highlight Preview] No paragraphs flagged for highlighting.")
+        
+        # Apply highlighting and generate debug previews
+        for para_idx in sorted(highlight_map.keys()):
             paragraph = doc.paragraphs[para_idx]
             for run in paragraph.runs:
                 run.font.highlight_color = 7  # Yellow
+            
+            issues = highlight_map[para_idx]
+            for issue_idx, issue in enumerate(issues, start=1):
+                issue_type = issue.get('type') or 'Unknown'
+                section = issue.get('section') or 'Unknown section'
+                expected = issue.get('expected') or ''
+                found = issue.get('found') or ''
+                print(
+                    f"[Highlight Preview]   Issue {issue_idx}: "
+                    f"type={issue_type} | section={section} | expected={expected} | found={found}"
+                )
+            preview = {
+                'paragraph_index': para_idx,
+                'paragraph_text': paragraph.text.strip(),
+                'issue_count': len(issues),
+                'issue_types': sorted(
+                    {issue['type'] for issue in issues if issue.get('type')}
+                ),
+                'issues': issues,
+            }
+            debug_data['paragraphs'].append(preview)
+            snippet = (paragraph.text or '').strip()
+            snippet = snippet[:120] + ('...' if len(snippet) > 120 else '')
+            print(
+                f"[Highlight Preview] Paragraph {para_idx} | "
+                f"{len(issues)} issue(s) | Types: {', '.join(preview['issue_types']) or 'N/A'} "
+                f"| Text: {snippet}"
+            )
         
         # Save highlighted document
         highlighted_bytes = io.BytesIO()
@@ -854,11 +960,14 @@ def highlight_mistakes(template_file, manuscript_file, mistakes_df):
         highlighted_bytes.seek(0)
         
         os.unlink(manuscript_path)
-        return highlighted_bytes.getvalue()
+        return highlighted_bytes.getvalue(), debug_data
         
     except Exception as e:
         print(f"Error highlighting: {str(e)}")
-        return None
+        return None, {
+            'summary': mistakes_summary,
+            'paragraphs': []
+        }
 
 # -------------------------
 # CLI Main

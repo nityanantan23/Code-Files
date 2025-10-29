@@ -32,6 +32,8 @@ if "processing_done" not in st.session_state:
     st.session_state.processing_done = False
 if "force_clear" not in st.session_state:
     st.session_state.force_clear = False
+if "highlight_debug_info" not in st.session_state:
+    st.session_state.highlight_debug_info = {'summary': {}, 'paragraphs': []}
 
 # --- Tabs for clean UI ---
 tabs = st.tabs(["📂 Upload Files & Analyze", "📊 Results & Download (Excel)", "🛠️ Auto Process & Download Processed Journal", "📖 User Manual"])
@@ -299,13 +301,18 @@ with tabs[2]:
                         manuscript_file.seek(0)
                         
                         processed_bytes = None
+                        highlight_debug = {'summary': {}, 'paragraphs': []}
                         process_type = ""
                         process_description = ""
                         original_name = manuscript_file.name
                         
                         if highlight_btn:
                             # Highlight only
-                            processed_bytes = highlight_mistakes(template_file, manuscript_file, st.session_state.mistakes_df)
+                            processed_bytes, highlight_debug = highlight_mistakes(
+                                template_file,
+                                manuscript_file,
+                                st.session_state.mistakes_df
+                            )
                             process_type = "HIGHLIGHTED"
                             process_description = "🟨 Highlighted Document"
                             success_message = "✅ Issues highlighted successfully!"
@@ -325,7 +332,11 @@ with tabs[2]:
                                 from io import BytesIO
                                 corrected_stream = BytesIO(corrected_bytes)
                                 template_file.seek(0)  # Reset template
-                                processed_bytes = highlight_mistakes(template_file, corrected_stream, st.session_state.mistakes_df)
+                                processed_bytes, highlight_debug = highlight_mistakes(
+                                    template_file,
+                                    corrected_stream,
+                                    st.session_state.mistakes_df
+                                )
                                 process_type = "CORRECTED_AND_HIGHLIGHTED"
                                 process_description = "⚡ Corrected & Highlighted Document"
                                 success_message = "✅ Corrections applied and issues highlighted!"
@@ -338,6 +349,7 @@ with tabs[2]:
                             st.session_state.processed_doc_name = f"{process_type}_{original_name}"
                             st.session_state.processing_done = True
                             st.session_state.process_description = process_description
+                            st.session_state.highlight_debug_info = highlight_debug
                             
                             st.success(success_message)
                             
@@ -349,11 +361,45 @@ with tabs[2]:
                             
                         else:
                             st.error("❌ Processing failed. Please try again.")
+                            st.session_state.highlight_debug_info = highlight_debug or {'summary': {}, 'paragraphs': []}
                             
                 except Exception as e:
                     st.error(f"❌ Processing failed: {str(e)}")
                     import traceback
                     st.error(f"Detailed error: {traceback.format_exc()}")
+        
+        debug_info = st.session_state.get("highlight_debug_info")
+        if debug_info:
+            if isinstance(debug_info, list):
+                debug_info = {'summary': {}, 'paragraphs': debug_info}
+            summary = debug_info.get('summary') or {}
+            paragraph_previews = debug_info.get('paragraphs') or []
+            has_summary = bool(summary.get('row_count') or summary.get('note') or summary.get('sample_rows'))
+            has_paragraphs = bool(paragraph_previews)
+            if has_summary or has_paragraphs:
+                with st.expander("🔍 Highlight debug details", expanded=False):
+                    if has_summary:
+                        st.markdown("**mistakes_df summary**")
+                        st.write(f"Rows: {summary.get('row_count', 0)}")
+                        columns = summary.get('columns') or []
+                        st.write(f"Columns: {', '.join(columns) if columns else 'None'}")
+                        note = summary.get('note')
+                        if note:
+                            st.info(note)
+                        sample_rows = summary.get('sample_rows') or []
+                        if sample_rows:
+                            st.dataframe(pd.DataFrame(sample_rows))
+                    if has_paragraphs:
+                        st.markdown("**Paragraph highlights**")
+                        for preview in paragraph_previews:
+                            issue_types = ", ".join(preview.get("issue_types", [])) or "N/A"
+                            issue_count = preview.get("issue_count", 0)
+                            st.write(
+                                f"Paragraph {preview.get('paragraph_index')} • "
+                                f"{issue_count} issue(s) • Types: {issue_types}"
+                            )
+                            paragraph_text = preview.get("paragraph_text") or "—"
+                            st.caption(paragraph_text)
         
         st.divider()
         
