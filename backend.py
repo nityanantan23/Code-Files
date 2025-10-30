@@ -33,6 +33,8 @@ HARDCODED_SECTION_OVERRIDES = {
     "results and discussions": {"bold": False},
     "body_text": {"bold": False},
     "references": {"font_size": 10.0, "bold": False},
+    "subtitle": {"font_size": 16.0, "bold": False},
+    "funding statement": {"bold": False},
 }
 SPECIAL_TITLE_TEXT = (
     "Dropout  P rediction  M odel for  C ollege  S tudents in MOOCs  B ased on  Weight ed   M ulti-feature and SVM"
@@ -60,6 +62,11 @@ SPECIAL_TEXT_TO_SECTION[
 SPECIAL_TEXT_FORMATTING_OVERRIDES[
     normalize_special_key(REQUIRED_JOURNAL_METADATA_LINE)
 ] = {"font_size": 9.0, "bold": False}
+
+SPECIAL_TEXT_TO_SECTION[normalize_special_key("Web Engineering")] = "journal_name"
+# SPECIAL_TEXT_FORMATTING_OVERRIDES[
+#     normalize_special_key("Web Engineering")
+# ] = {"font_size": 18.0, "bold": True}
 
 
 def apply_special_text_overrides(section_type, paragraph_text, formatting):
@@ -105,6 +112,7 @@ class TemplateProfile:
                 "submission_history",
                 "journal_name",
                 "journal_metadata",
+                "subtitle",
             ):
                 continue
             if section not in required:
@@ -254,6 +262,7 @@ SECTION_TO_ROLE = {
     "journal_name": "jiwe:journal-header",
     "journal_metadata": "jiwe:journal-metadata",
     "title": "jiwe:title",
+    "subtitle": "jiwe:subtitle",
     "authors": "jiwe:authors",
     "affiliation": "jiwe:affiliation",
     "corresponding_author": "jiwe:corresponding",
@@ -274,6 +283,7 @@ ROLE_TAG_TO_SECTION = {
     "jiwe:journal-header": "journal_name",
     "jiwe:journal-metadata": "journal_metadata",
     "jiwe:title": "title",
+    "jiwe:subtitle": "subtitle",
     "jiwe:authors": "authors",
     "jiwe:affiliation": "affiliation",
     "jiwe:corresponding": "corresponding_author",
@@ -295,6 +305,7 @@ SECTION_TO_RULE_ROLE = {
     "title": "title",
     "journal_name": "journal-header",
     "journal_metadata": "journal-metadata",
+    "subtitle": "subtitle",
     "authors": "authors",
     "affiliation": "affiliation",
     "corresponding_author": "corresponding",
@@ -503,6 +514,7 @@ def build_rules_xml():
         ("title", "Times New Roman", "24", "bold", None),
         ("journal-header", "Palatino Linotype", "24", "bold", None),
         ("journal-metadata", "Times New Roman", "9", "normal", None),
+        ("subtitle", "Times New Roman", "16", "normal", None),
         ("authors", "Times New Roman", "11", "bold", None),
         ("affiliation", "Times New Roman", "9", "normal", None),
         ("corresponding", "Times New Roman", "9", "normal", "italic"),
@@ -1168,6 +1180,7 @@ def classify_section_type(paragraph):
         "keywords": ["keywords", "keyword"],
         "affiliation": ["affiliation", "department of", "faculty of", "school of"],
         "introduction": ["introduction"],
+        "subtitle": ["subtitle"],
         "literature review": ["literature review", "related work"],
         "research methodology": ["research methodology", "methodology", "methods"],
         "results and discussions": ["results and discussions", "results", "discussion"],
@@ -1213,6 +1226,8 @@ def classify_section_type(paragraph):
 
     # 1) Paragraph style strong hints
     if p_style:
+        if "subtitle" in p_style:
+            return "subtitle"
         if "title" in p_style:
             return "title"
         if "heading" in p_style or p_style.startswith("h"):
@@ -1655,6 +1670,7 @@ def get_default_formatting(section_type):
     defaults = {
         # === Titles ===
         "title": {"font_size": 24.0, "bold": False, "font_name": "Times New Roman"},
+        "subtitle": {"font_size": 16.0, "bold": False, "font_name": "Times New Roman"},
         # === Author Info ===
         "authors": {"font_size": 11.0, "bold": True, "font_name": "Times New Roman"},
         "affiliation": {
@@ -1721,7 +1737,7 @@ def get_default_formatting(section_type):
         },
         "funding statement": {
             "font_size": 10.0,
-            "bold": True,
+            "bold": False,
             "font_name": "Times New Roman",
         },
         "author contributions": {
@@ -2136,6 +2152,26 @@ def check_section_order(manuscript_paragraphs, template_profile):
                     f"Retain one '{format_section_label(section)}' section matching the template sequence",
                 )
             )
+
+    funding_para = first_occurrence.get("funding statement")
+    references_para = first_occurrence.get("references")
+    if (
+        funding_para
+        and references_para
+        and funding_para["index"] >= references_para["index"]
+    ):
+        snippet = funding_para.get("text", "")
+        findings.append(
+            create_finding(
+                "funding statement",
+                funding_para["index"],
+                "section_order_mismatch",
+                "Does not appear immediately before References",
+                "Immediately precede References",
+                snippet,
+                "Move the funding statement section so it is placed directly before the references section.",
+            )
+        )
 
     return findings
 
@@ -2869,7 +2905,7 @@ def insert_missing_sections(template_file, manuscript_file, missing_sections):
             size_pt=10.0,
             bold=False,
             italic=False,
-            highlight=True,
+            highlight=False,
         ):
             p = ET.Element(w_tag("p"))
             r = ET.SubElement(p, w_tag("r"))
@@ -2933,18 +2969,71 @@ def insert_missing_sections(template_file, manuscript_file, missing_sections):
         # Build manuscript section occurrences for body-level paragraphs only
         m_style_fonts, m_default_font = load_style_fonts(manuscript_file)
         body_paras = body.findall("./w:p", NSMAP)
+        sections_by_index = []
+        body_context_sections = []
         occurrences = defaultdict(list)  # section -> list of body indices
         first_occurrence = {}
-        for i, p in enumerate(body_paras):
-            para_dict = extract_paragraph_formatting(
-                p, i, m_style_fonts, m_default_font
-            )
-            if not para_dict:
-                continue
-            sect = classify_section_type(para_dict)
-            occurrences[sect].append(i)
-            if sect not in first_occurrence:
-                first_occurrence[sect] = i
+        heading_context_exclusions = {
+            "figure_caption",
+            "table_caption",
+            "journal_metadata",
+            "journal_name",
+        }
+        funding_anchor_element = None
+
+        def rebuild_section_maps():
+            nonlocal sections_by_index, body_context_sections, occurrences, first_occurrence, funding_anchor_element
+            sections_by_index = []
+            body_context_sections = []
+            occurrences = defaultdict(list)
+            first_occurrence = {}
+            last_heading = None
+
+            for i, p in enumerate(body_paras):
+                para_dict = extract_paragraph_formatting(
+                    p, i, m_style_fonts, m_default_font
+                )
+                section = classify_section_type(para_dict) if para_dict else None
+                sections_by_index.append(section)
+
+                if section and section != "body_text":
+                    if section not in heading_context_exclusions:
+                        last_heading = section
+                    body_context_sections.append(None)
+                elif section == "body_text":
+                    body_context_sections.append(last_heading)
+                else:
+                    body_context_sections.append(None)
+
+                if section:
+                    occurrences[section].append(i)
+                    if section not in first_occurrence:
+                        first_occurrence[section] = i
+
+        rebuild_section_maps()
+
+        def logical_first_index(section_name: str):
+            for idx, section in enumerate(sections_by_index):
+                if section == section_name:
+                    return idx
+                if (
+                    section == "body_text"
+                    and body_context_sections[idx] == section_name
+                ):
+                    return idx
+            return None
+
+        def logical_last_index(section_name: str):
+            for idx in range(len(sections_by_index) - 1, -1, -1):
+                section = sections_by_index[idx]
+                if section == section_name:
+                    return idx
+                if (
+                    section == "body_text"
+                    and body_context_sections[idx] == section_name
+                ):
+                    return idx
+            return None
 
         def paragraph_plain_text(element):
             """Return concatenated text content of a paragraph."""
@@ -2978,50 +3067,129 @@ def insert_missing_sections(template_file, manuscript_file, missing_sections):
 
         def insertion_index_for(section_name: str):
             """Find body-level index to insert according to template order: before next section or after previous."""
+            nonlocal funding_anchor_element
             if not effective_order:
                 return None
             try:
                 s_idx = effective_order.index(section_name)
             except ValueError:
                 return None
-            # Find next existing section in manuscript
+            # Funding statement placement uses acknowledgement anchor only
+            if section_name == "funding statement":
+                references_idx = logical_first_index("references")
+                ack_norm = normalize_special_key("acknowledgement")
+                funding_anchor_element = None
+                ack_start_idx = None
+                for i, sect in enumerate(sections_by_index):
+                    ctx = body_context_sections[i]
+                    text_norm = normalize_special_key(
+                        paragraph_plain_text(body_paras[i])
+                    )
+                    if sect == "acknowledgement":
+                        ack_start_idx = i
+                        break
+                    if sect == "body_text" and ctx == "acknowledgement":
+                        ack_start_idx = i
+                        break
+                    if text_norm and text_norm.startswith(ack_norm):
+                        ack_start_idx = i
+                        break
+
+                if ack_start_idx is not None:
+                    ack_end_idx = ack_start_idx
+                    j = ack_start_idx + 1
+                    while j < len(sections_by_index):
+                        next_sect = sections_by_index[j]
+                        next_ctx = body_context_sections[j]
+                        next_text_norm = normalize_special_key(
+                            paragraph_plain_text(body_paras[j])
+                        )
+                        if next_sect == "body_text":
+                            ack_end_idx = j
+                            j += 1
+                            continue
+                        if next_sect is None and not next_text_norm:
+                            ack_end_idx = j
+                            j += 1
+                            continue
+                        if (
+                            next_sect == "body_text"
+                            and next_ctx == "acknowledgement"
+                        ):
+                            ack_end_idx = j
+                            j += 1
+                            continue
+                        break
+
+                    funding_anchor_element = body_paras[ack_end_idx]
+                    insertion_point = ack_end_idx + 1
+                    while (
+                        insertion_point < len(sections_by_index)
+                        and sections_by_index[insertion_point] == "body_text"
+                        and body_context_sections[insertion_point] == "acknowledgement"
+                    ):
+                        insertion_point += 1
+                    if (
+                        references_idx is not None
+                        and insertion_point > references_idx
+                    ):
+                        insertion_point = references_idx
+                    return insertion_point
+
+                return references_idx if references_idx is not None else len(body_paras)
+
+            # Find next existing section in manuscript (logical first occurrence)
             for nxt in effective_order[s_idx + 1 :]:
-                if nxt in first_occurrence:
-                    return max(0, first_occurrence[nxt])
-            # Otherwise insert after the last occurrence of any previous
-            prev_indices = []
+                logical_idx = logical_first_index(nxt)
+                if logical_idx is not None:
+                    return max(0, logical_idx)
+            # Otherwise insert after the logical end of the previous section
             for prv in reversed(effective_order[:s_idx]):
-                if occurrences.get(prv):
-                    prev_indices = occurrences[prv]
-                    break
-            if prev_indices:
-                return prev_indices[-1] + 1
+                last_idx = logical_last_index(prv)
+                if last_idx is not None:
+                    return last_idx + 1
             return None
 
         def insert_section(section_key: str, heading: str, content: str):
+            nonlocal body_paras, funding_anchor_element
             idx = insertion_index_for(section_key)
-            h_p = create_paragraph(heading, bold=False)
-            c_p = create_paragraph(content, bold=False)
-            if idx is None or idx >= len(body_paras):
+            heading_bold = section_key != "funding statement"
+            h_p = create_paragraph(heading, bold=heading_bold, highlight=True)
+            c_p = create_paragraph(content, bold=False, highlight=True)
+            if (
+                section_key == "funding statement"
+                and funding_anchor_element is not None
+            ):
+                anchor = funding_anchor_element
+                funding_anchor_idx = body_paras.index(anchor)
+                anchor.addnext(c_p)
+                anchor.addnext(h_p)
+                body_paras.insert(funding_anchor_idx + 1, h_p)
+                body_paras.insert(funding_anchor_idx + 2, c_p)
+                funding_anchor_element = None
+            elif idx is None or idx >= len(body_paras):
                 # Append at end
                 body.append(h_p)
                 body.append(c_p)
+                body_paras.extend([h_p, c_p])
             else:
                 body.insert(idx, h_p)
                 body.insert(idx + 1, c_p)
                 # keep body_paras view in sync for subsequent insertions
                 body_paras.insert(idx, h_p)
                 body_paras.insert(idx + 1, c_p)
+            rebuild_section_maps()
 
         # If BOTH Acknowledgement and Funding Statement are missing, and References exists,
         # insert both as a block immediately BEFORE References (in this order: Acknowledgement, Funding Statement)
         if "acknowledgement" in missing_norm and "funding statement" in missing_norm:
-            ref_idx = first_occurrence.get("references")
+            ref_idx = logical_first_index("references")
             if ref_idx is not None:
                 # helper to insert a titled section at a specific body index
                 def insert_at_index(i, heading, content):
-                    h_p = create_paragraph(heading, bold=False)
-                    c_p = create_paragraph(content, bold=False)
+                    heading_bold = heading == default_blocks["acknowledgement"]["heading"]
+                    h_p = create_paragraph(heading, bold=heading_bold, highlight=True)
+                    c_p = create_paragraph(content, bold=False, highlight=True)
                     body.insert(i, h_p)
                     body.insert(i + 1, c_p)
                     body_paras.insert(i, h_p)
@@ -3039,6 +3207,7 @@ def insert_missing_sections(template_file, manuscript_file, missing_sections):
                     default_blocks["funding statement"]["heading"],
                     default_blocks["funding statement"]["content"],
                 )
+                rebuild_section_maps()
                 # mark handled to avoid reinserting below
                 missing_norm.discard("acknowledgement")
                 missing_norm.discard("funding statement")
