@@ -35,6 +35,8 @@ class TemplateProfile:
     raw_examples: dict
     custom_rules: dict = None
     _match_cache: dict = None
+    context_rules: dict = None
+    context_examples: dict = None
 
     def required_sections(self):
         """Sections that must appear in manuscripts."""
@@ -55,7 +57,9 @@ class TemplateProfile:
                 required.append(section)
         return required or ["title", "abstract", "keywords", "references"]
 
-    def resolve_expected_format(self, section_type, paragraph_text):
+    def resolve_expected_format(
+        self, section_type, paragraph_text, context_section=None
+    ):
         """Return expected formatting for given section and text using template examples."""
         base = {}
 
@@ -71,25 +75,43 @@ class TemplateProfile:
             for key, value in aggregated.items():
                 base.setdefault(key, value)
 
-        # 3) Fallback to generic body text default
+        # 3) Overlay context-specific rules (e.g., body text under References)
+        if context_section and self.context_rules:
+            context_fmt = self.context_rules.get((section_type, context_section))
+            if context_fmt:
+                base.update(context_fmt)
+
+        base = ensure_font_size_pair(base)
+
+        # 4) Fallback to generic body text default
         if not base:
             base.update(self.rules.get("body_text", {}))
+            base = ensure_font_size_pair(base)
 
-        example, score = self.find_matching_example(section_type, paragraph_text)
+        example, score = self.find_matching_example(
+            section_type, paragraph_text, context_section=context_section
+        )
         if example:
             fmt = dict(base)
-            for key in ("font_size", "font_name", "bold", "italic"):
+            for key in ("font_size", "font_size_w_val", "font_name", "bold", "italic"):
                 if key not in fmt or fmt[key] is None:
                     if example.get(key) is not None:
                         fmt[key] = example[key]
+            fmt = ensure_font_size_pair(fmt)
             if fmt:
                 return fmt
 
-        return base
+        return ensure_font_size_pair(base)
 
-    def find_matching_example(self, section_type, paragraph_text):
+    def find_matching_example(
+        self, section_type, paragraph_text, context_section=None
+    ):
         """Find the best template example for the provided text."""
-        examples = self.raw_examples.get(section_type) or []
+        examples = []
+        if context_section and self.context_examples:
+            examples = self.context_examples.get((section_type, context_section)) or []
+        if not examples:
+            examples = self.raw_examples.get(section_type) or []
         if not examples:
             return None, 0.0
 
@@ -563,7 +585,11 @@ def load_custom_rules(docx_source):
                         size = font_elem.get("sizePt")
                         if size:
                             try:
-                                info["font_size"] = float(size)
+                                size_pt = float(size)
+                                info["font_size"] = size_pt
+                                hp = pt_to_half_points(size_pt)
+                                if hp is not None:
+                                    info["font_size_w_val"] = hp
                             except ValueError:
                                 pass
                         weight = (font_elem.get("weight") or "").lower()
@@ -607,7 +633,11 @@ def load_custom_rules(docx_source):
                     size = font_elem.get("sizePt")
                     if size:
                         try:
-                            info["font_size"] = float(size)
+                            size_pt = float(size)
+                            info["font_size"] = size_pt
+                            hp = pt_to_half_points(size_pt)
+                            if hp is not None:
+                                info["font_size_w_val"] = hp
                         except ValueError:
                             pass
                     weight = (font_elem.get("weight") or "").lower()
@@ -858,6 +888,7 @@ def extract_paragraph_formatting(paragraph, index, style_fonts=None, default_fon
         "text": full_text,
         "p_style": p_style,
         "font_size": dominant_format.get("font_size"),
+        "font_size_w_val": dominant_format.get("font_size_w_val"),
         "font_name": dominant_format.get("font_name"),
         "bold": dominant_format.get("bold", False),
         "italic": dominant_format.get("italic", False),
@@ -875,9 +906,21 @@ def extract_run_formatting(run, style_fonts=None, default_font=None, style_id=No
         return format_data
 
     # Font size
+    size_val = None
     sz = rPr.find("./w:sz", NSMAP)
-    if sz is not None and sz.get("{%s}val" % W_NS):
-        format_data["font_size"] = half_points_to_pt(sz.get("{%s}val" % W_NS))
+    if sz is not None:
+        size_val = sz.get("{%s}val" % W_NS)
+    if not size_val:
+        szCs = rPr.find("./w:szCs", NSMAP)
+        if szCs is not None:
+            size_val = szCs.get("{%s}val" % W_NS)
+    if size_val:
+        half_points = normalize_half_points(size_val)
+        if half_points is not None:
+            format_data["font_size_w_val"] = half_points
+            pt_value = half_points_to_pt(half_points)
+            if pt_value is not None:
+                format_data["font_size"] = pt_value
 
     # Font name
     rf = rPr.find("./w:rFonts", NSMAP)
@@ -929,6 +972,7 @@ def get_dominant_formatting(runs_data):
         return {}
 
     font_sizes = []
+    font_size_vals = []
     font_names = []
     bold_count = 0
     italic_count = 0
@@ -937,6 +981,8 @@ def get_dominant_formatting(runs_data):
     for run in runs_data:
         if run.get("font_size"):
             font_sizes.append(run["font_size"])
+        if run.get("font_size_w_val") is not None:
+            font_size_vals.append(run["font_size_w_val"])
         if run.get("font_name"):
             font_names.append(run["font_name"])
         if run.get("bold"):
@@ -948,6 +994,13 @@ def get_dominant_formatting(runs_data):
 
     if font_sizes:
         dominant["font_size"] = Counter(font_sizes).most_common(1)[0][0]
+    elif font_size_vals:
+        dominant["font_size"] = half_points_to_pt(
+            Counter(font_size_vals).most_common(1)[0][0]
+        )
+
+    if font_size_vals:
+        dominant["font_size_w_val"] = Counter(font_size_vals).most_common(1)[0][0]
 
     if font_names:
         dominant["font_name"] = Counter(font_names).most_common(1)[0][0]
@@ -1024,13 +1077,40 @@ def classify_section_type(paragraph):
     if alpha_count <= 2 and len(cleaned) <= 6:
         return "body_text"
 
+    section_keywords = {
+        "abstract": ["abstract"],
+        "keywords": ["keywords", "keyword"],
+        "affiliation": ["affiliation", "department of", "faculty of", "school of"],
+        "introduction": ["introduction"],
+        "literature review": ["literature review", "related work"],
+        "research methodology": ["research methodology", "methodology", "methods"],
+        "results and discussions": ["results and discussions", "results", "discussion"],
+        "conclusion": ["conclusion", "conclusions"],
+        "acknowledgement": ["acknowledgement", "acknowledgments", "acknowledgement"],
+        "funding statement": ["funding statement", "funding"],
+        "author contributions": ["author contributions", "contributions"],
+        "conflict of interests": [
+            "conflict of interests",
+            "conflicts of interest",
+            "competing interests",
+        ],
+        "ethics statements": ["ethics statements", "ethical statement", "ethics"],
+        "references": ["references", "reference", "bibliography"],
+    }
+
     if (
         "font size" in lower_text
         and "title" not in lower_text
         and "figure" not in lower_text
         and "table" not in lower_text
     ):
-        return "body_text"
+        simplified_heading = re.sub(r"\s*\(.*?\)", " ", cleaned).strip()
+        all_keywords = {kw for kws in section_keywords.values() for kw in kws}
+        if not any(
+            simplified_heading.startswith(kw) or f" {kw} " in simplified_heading
+            for kw in all_keywords
+        ):
+            return "body_text"
 
     if idx <= 1 and "journal" in lower_text:
         return "journal_name"
@@ -1075,28 +1155,6 @@ def classify_section_type(paragraph):
         if re.match(pattern, cleaned, re.IGNORECASE):
             if len(text) < 300:
                 return "table_caption"
-
-    # 5) Section keywords (use cleaned text and word-boundary checks)
-    section_keywords = {
-        "abstract": ["abstract"],
-        "keywords": ["keywords", "keyword"],
-        "affiliation": ["affiliation", "department of", "faculty of", "school of"],
-        "introduction": ["introduction"],
-        "literature review": ["literature review", "related work"],
-        "research methodology": ["research methodology", "methodology", "methods"],
-        "results and discussions": ["results and discussions", "results", "discussion"],
-        "conclusion": ["conclusion", "conclusions"],
-        "acknowledgement": ["acknowledgement", "acknowledgments", "acknowledgement"],
-        "funding statement": ["funding statement", "funding"],
-        "author contributions": ["author contributions", "contributions"],
-        "conflict of interests": [
-            "conflict of interests",
-            "conflicts of interest",
-            "competing interests",
-        ],
-        "ethics statements": ["ethics statements", "ethical statement", "ethics"],
-        "references": ["references", "reference", "bibliography"],
-    }
 
     # Check explicit starts (cleaned) e.g. "introduction", or exact match, or word-boundary anywhere
     for sect, kws in section_keywords.items():
@@ -1292,8 +1350,16 @@ def analyze_template_formatting(template_paragraphs, custom_rules=None):
     """Analyze template to extract formatting rules and structural expectations."""
     rules = {}
     section_examples = defaultdict(list)
+    context_examples = defaultdict(list)
     section_order = []
     seen = set()
+    last_context_section = None
+    heading_context_exclusions = {
+        "figure_caption",
+        "table_caption",
+        "journal_metadata",
+        "journal_name",
+    }
 
     # First pass: classify each paragraph and collect examples with ordering
     for para in template_paragraphs:
@@ -1302,17 +1368,34 @@ def analyze_template_formatting(template_paragraphs, custom_rules=None):
         if section_type not in seen:
             section_order.append(section_type)
             seen.add(section_type)
+        if section_type == "body_text":
+            if last_context_section:
+                context_examples[("body_text", last_context_section)].append(para)
+        else:
+            if section_type not in heading_context_exclusions:
+                last_context_section = section_type
 
     # Second pass: determine formatting for each section
     for section_type, examples in section_examples.items():
         if examples:
             rules[section_type] = determine_section_formatting(section_type, examples)
 
+    context_rules = {}
+    for key, examples in context_examples.items():
+        if examples:
+            section_type, _ = key
+            context_rules[key] = determine_section_formatting(section_type, examples)
+
+    raw_examples = {k: list(v) for k, v in section_examples.items()}
+    context_examples_dict = {k: list(v) for k, v in context_examples.items()}
+
     return TemplateProfile(
         rules=rules,
         section_order=section_order,
-        raw_examples=section_examples,
+        raw_examples=raw_examples,
         custom_rules=custom_rules or {},
+        context_rules=context_rules,
+        context_examples=context_examples_dict,
     )
 
 
@@ -1333,12 +1416,15 @@ def determine_section_formatting(section_type, examples):
 
     formatting = {}
     font_size = most_common("font_size")
+    font_size_w_val = most_common("font_size_w_val")
     font_name = most_common("font_name")
     bold_choice = most_common("bold")
     italic_choice = most_common("italic")
 
     if font_size is not None:
         formatting["font_size"] = font_size
+    if font_size_w_val is not None:
+        formatting["font_size_w_val"] = font_size_w_val
     if font_name is not None:
         formatting["font_name"] = font_name
     if bold_choice is not None:
@@ -1365,10 +1451,16 @@ def determine_section_formatting(section_type, examples):
                 continue
             if key not in formatting:
                 formatting[key] = candidate
-        return formatting
+        if (
+            "font_size_w_val" not in formatting
+            and best_example.get("font_size_w_val") is not None
+        ):
+            formatting["font_size_w_val"] = best_example["font_size_w_val"]
+        return ensure_font_size_pair(formatting)
 
     # Fallback to defaults if we cannot determine anything reliable
-    return get_default_formatting(section_type)
+    fallback = get_default_formatting(section_type)
+    return ensure_font_size_pair(fallback)
 
 
 def is_valid_template_example(paragraph):
@@ -1591,7 +1683,9 @@ def get_default_formatting(section_type):
         "references": {"font_size": 9.0, "bold": False, "font_name": "Times New Roman"},
     }
 
-    return defaults.get(section_type, defaults["body_text"])
+    template = defaults.get(section_type, defaults["body_text"])
+    fmt = dict(template)
+    return ensure_font_size_pair(fmt)
 
 
 def compare_against_template(manuscript_paragraphs, template_profile):
@@ -1606,16 +1700,19 @@ def compare_against_template(manuscript_paragraphs, template_profile):
             continue
 
         section_type = classify_section_type(para)
+        context_section = last_context_section if section_type == "body_text" else None
         expected = template_profile.resolve_expected_format(
-            section_type, para.get("text", "")
+            section_type,
+            para.get("text", ""),
+            context_section=context_section,
         )
         if not expected:
             expected = get_default_formatting(section_type) or body_rule
 
         display_section = section_type
         if section_type == "body_text":
-            if last_context_section:
-                display_section = f"body_text::{last_context_section}"
+            if context_section:
+                display_section = f"body_text::{context_section}"
             else:
                 display_section = "body_text::general"
         else:
@@ -1638,6 +1735,76 @@ def compare_against_template(manuscript_paragraphs, template_profile):
     return findings
 
 
+def format_pt_display(value):
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if abs(numeric - round(numeric)) < 1e-6:
+        return f"{int(round(numeric))} pt"
+    return f"{round(numeric, 2)} pt"
+
+
+def format_font_size_display(pt, hp):
+    pt_text = format_pt_display(pt)
+    if hp is not None and pt_text:
+        return f"{pt_text} (w:val={hp})"
+    if hp is not None:
+        return f"w:val={hp}"
+    if pt_text:
+        return pt_text
+    return "Not detected"
+
+
+def font_size_fix_text(expected_pt, expected_hp):
+    pt_text = format_pt_display(expected_pt)
+    if pt_text:
+        return f"Set font size to {pt_text}"
+    if expected_hp is not None:
+        return f"Adjust font size to match w:val {expected_hp}"
+    return "Adjust font size to match the template"
+
+
+def should_flag_font_size_mismatch(paragraph, expected):
+    if not isinstance(expected, dict):
+        return False
+    expected_hp = expected.get("font_size_w_val")
+    actual_hp = paragraph.get("font_size_w_val")
+    if expected_hp is not None and actual_hp is not None:
+        return expected_hp != actual_hp
+    expected_pt = expected.get("font_size")
+    actual_pt = paragraph.get("font_size")
+    if expected_pt is not None and actual_pt is not None:
+        return abs(expected_pt - actual_pt) >= 0.5
+    return False
+
+
+def build_font_size_mismatch_finding(paragraph, expected, section_label):
+    if not should_flag_font_size_mismatch(paragraph, expected):
+        return None
+
+    actual_pt = paragraph.get("font_size")
+    actual_hp = paragraph.get("font_size_w_val")
+    expected_pt = expected.get("font_size")
+    expected_hp = expected.get("font_size_w_val")
+
+    found_display = format_font_size_display(actual_pt, actual_hp)
+    expected_display = format_font_size_display(expected_pt, expected_hp)
+    fix_text = font_size_fix_text(expected_pt, expected_hp)
+
+    return create_finding(
+        section_label,
+        paragraph["index"],
+        "font_size_mismatch",
+        found_display,
+        expected_display,
+        paragraph.get("text", ""),
+        fix_text,
+    )
+
+
 def check_formatting_mismatches(
     paragraph, section_type, expected, display_section=None
 ):
@@ -1657,21 +1824,11 @@ def check_formatting_mismatches(
 
     if section_type == "body_text":
         # Still check font size / font name only
-        if expected.get("font_size") and paragraph.get("font_size"):
-            expected_size = expected["font_size"]
-            actual_size = paragraph["font_size"]
-            if abs(expected_size - actual_size) > 1.0:
-                findings.append(
-                    create_finding(
-                        target_section,
-                        paragraph["index"],
-                        "font_size_mismatch",
-                        f"{actual_size} pt",
-                        f"{expected_size} pt",
-                        paragraph["text"],
-                        f"Set font size to {expected_size} pt",
-                    )
-                )
+        font_size_issue = build_font_size_mismatch_finding(
+            paragraph, expected, target_section
+        )
+        if font_size_issue:
+            findings.append(font_size_issue)
         if expected.get("font_name") and paragraph.get("font_name"):
             if not fonts_similar(expected["font_name"], paragraph["font_name"]):
                 findings.append(
@@ -1763,21 +1920,11 @@ def check_formatting_mismatches(
             )
 
     # --- 4️⃣ Font size & family checks (same as before) ---
-    if expected.get("font_size") and paragraph.get("font_size"):
-        expected_size = expected["font_size"]
-        actual_size = paragraph["font_size"]
-        if abs(expected_size - actual_size) > 1.0:
-            findings.append(
-                create_finding(
-                    target_section,
-                    paragraph["index"],
-                    "font_size_mismatch",
-                    f"{actual_size} pt",
-                    f"{expected_size} pt",
-                    paragraph["text"],
-                    f"Set font size to {expected_size} pt",
-                )
-            )
+    font_size_issue = build_font_size_mismatch_finding(
+        paragraph, expected, target_section
+    )
+    if font_size_issue:
+        findings.append(font_size_issue)
 
     if expected.get("font_name") and paragraph.get("font_name"):
         expected_font = expected["font_name"]
@@ -1907,11 +2054,48 @@ def now_timestamp():
     return time.strftime("%Y%m%d_%H%M%S")
 
 
+def normalize_half_points(value):
+    if value is None:
+        return None
+    try:
+        return int(round(float(value)))
+    except Exception:
+        return None
+
+
 def half_points_to_pt(val):
     try:
         return round(float(val) / 2.0, 2)
     except Exception:
         return None
+
+
+def pt_to_half_points(value):
+    if value is None:
+        return None
+    try:
+        return int(round(float(value) * 2.0))
+    except Exception:
+        return None
+
+
+def ensure_font_size_pair(formatting):
+    if not isinstance(formatting, dict):
+        return formatting
+
+    hp = formatting.get("font_size_w_val")
+    pt = formatting.get("font_size")
+
+    if hp is not None and pt is None:
+        converted = half_points_to_pt(hp)
+        if converted is not None:
+            formatting["font_size"] = converted
+    elif hp is None and pt is not None:
+        converted = pt_to_half_points(pt)
+        if converted is not None:
+            formatting["font_size_w_val"] = converted
+
+    return formatting
 
 
 def text_snippet(s, length=140):
