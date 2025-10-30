@@ -25,6 +25,61 @@ NSMAP = {"w": W_NS}
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 M_NSMAP = {"m": M_NS}
 
+SPECIAL_TEXT_TO_SECTION = {}
+SPECIAL_TEXT_FORMATTING_OVERRIDES = {}
+HARDCODED_SECTION_OVERRIDES = {
+    "journal_metadata": {"font_size": 9.0, "bold": False},
+    "introduction": {"bold": False},
+    "results and discussions": {"bold": False},
+    "body_text": {"bold": False},
+    "references": {"font_size": 10.0, "bold": False},
+}
+SPECIAL_TITLE_TEXT = (
+    "Dropout  P rediction  M odel for  C ollege  S tudents in MOOCs  B ased on  Weight ed   M ulti-feature and SVM"
+)
+REQUIRED_JOURNAL_METADATA_LINE = (
+    "1 ,3   4WGP+JQP, Shenheer Rd, Chang'An, Xi'An, 710100 Shaanxi, China."
+)
+
+
+def normalize_special_key(text):
+    if not text:
+        return ""
+    simplified = re.sub(r"\s+", "", text)
+    return simplified.lower()
+
+
+SPECIAL_TEXT_TO_SECTION[normalize_special_key(SPECIAL_TITLE_TEXT)] = "title"
+SPECIAL_TEXT_FORMATTING_OVERRIDES[
+    normalize_special_key(SPECIAL_TITLE_TEXT)
+] = {"font_size": 24.0, "bold": False}
+
+SPECIAL_TEXT_TO_SECTION[
+    normalize_special_key(REQUIRED_JOURNAL_METADATA_LINE)
+] = "journal_metadata"
+SPECIAL_TEXT_FORMATTING_OVERRIDES[
+    normalize_special_key(REQUIRED_JOURNAL_METADATA_LINE)
+] = {"font_size": 9.0, "bold": False}
+
+
+def apply_special_text_overrides(section_type, paragraph_text, formatting):
+    """Force hard-coded formatting for known special-case paragraphs."""
+    if formatting is None:
+        formatting = {}
+
+    result = dict(formatting)
+    special_key = normalize_special_key(paragraph_text)
+    overrides = SPECIAL_TEXT_FORMATTING_OVERRIDES.get(special_key)
+    if overrides:
+        result.update(overrides)
+        if "font_size" in overrides and "font_size_w_val" not in overrides:
+            if "font_size_w_val" not in result and overrides.get("font_size") is not None:
+                hp_value = pt_to_half_points(overrides["font_size"])
+                if hp_value is not None:
+                    result["font_size_w_val"] = hp_value
+
+    return ensure_font_size_pair(result)
+
 
 @dataclass
 class TemplateProfile:
@@ -48,7 +103,6 @@ class TemplateProfile:
                 "figure_caption",
                 "table_caption",
                 "submission_history",
-                "license_notice",
                 "journal_name",
                 "journal_metadata",
             ):
@@ -81,6 +135,33 @@ class TemplateProfile:
             if context_fmt:
                 base.update(context_fmt)
 
+        override_fmt = HARDCODED_SECTION_OVERRIDES.get(section_type)
+        if override_fmt:
+            base.update(override_fmt)
+            if (
+                override_fmt.get("font_size") is not None
+                and base.get("font_size_w_val") is None
+            ):
+                hp_value = pt_to_half_points(override_fmt["font_size"])
+                if hp_value is not None:
+                    base["font_size_w_val"] = hp_value
+
+        if (
+            section_type == "body_text"
+            and context_section
+            and isinstance(context_section, str)
+        ):
+            normalized_context = context_section.lower()
+            if normalized_context.startswith("results and discussion"):
+                base["bold"] = False
+            if normalized_context.startswith("references"):
+                base["font_size"] = 9.0
+                base["bold"] = False
+                if base.get("font_size_w_val") is None:
+                    hp_value = pt_to_half_points(9.0)
+                    if hp_value is not None:
+                        base["font_size_w_val"] = hp_value
+
         base = ensure_font_size_pair(base)
 
         # 4) Fallback to generic body text default
@@ -99,9 +180,13 @@ class TemplateProfile:
                         fmt[key] = example[key]
             fmt = ensure_font_size_pair(fmt)
             if fmt:
-                return fmt
+                return apply_special_text_overrides(
+                    section_type, paragraph_text, fmt
+                )
 
-        return ensure_font_size_pair(base)
+        return apply_special_text_overrides(
+            section_type, paragraph_text, ensure_font_size_pair(base)
+        )
 
     def find_matching_example(
         self, section_type, paragraph_text, context_section=None
@@ -175,7 +260,6 @@ SECTION_TO_ROLE = {
     "abstract": "jiwe:abstract",
     "keywords": "jiwe:keywords",
     "submission_history": "jiwe:submission-history",
-    "license_notice": "jiwe:license-notice",
     "figure_caption": "jiwe:figure-caption",
     "table_caption": "jiwe:table-caption",
     "acknowledgement": "jiwe:ack-text",
@@ -196,7 +280,6 @@ ROLE_TAG_TO_SECTION = {
     "jiwe:abstract": "abstract",
     "jiwe:keywords": "keywords",
     "jiwe:submission-history": "submission_history",
-    "jiwe:license-notice": "license_notice",
     "jiwe:figure-caption": "figure_caption",
     "jiwe:table-caption": "table_caption",
     "jiwe:ack-text": "acknowledgement",
@@ -218,7 +301,6 @@ SECTION_TO_RULE_ROLE = {
     "abstract": "abstract",
     "keywords": "keywords",
     "submission_history": "submission-history",
-    "license_notice": "license-notice",
     "body_text": "body",
     "figure_caption": "caption",
     "table_caption": "caption",
@@ -420,7 +502,7 @@ def build_rules_xml():
     font_specs = [
         ("title", "Times New Roman", "24", "bold", None),
         ("journal-header", "Palatino Linotype", "24", "bold", None),
-        ("journal-metadata", "Times New Roman", "12", "normal", None),
+        ("journal-metadata", "Times New Roman", "9", "normal", None),
         ("authors", "Times New Roman", "11", "bold", None),
         ("affiliation", "Times New Roman", "9", "normal", None),
         ("corresponding", "Times New Roman", "9", "normal", "italic"),
@@ -431,7 +513,7 @@ def build_rules_xml():
         ("heading-2", "Times New Roman", "10", "bold", None),
         ("heading-3", "Times New Roman", "10", "bold", "italic"),
         ("caption", "Times New Roman", "10", "normal", None),
-        ("reference", "Times New Roman", "9", "normal", None),
+        ("reference", "Times New Roman", "10", "normal", None),
     ]
     for role, family, size, weight, style in font_specs:
         font_elem = ET.SubElement(
@@ -1042,6 +1124,10 @@ def classify_section_type(paragraph):
             return "body_text"
 
     raw = (paragraph.get("text") or "").strip()
+    special_key = normalize_special_key(raw)
+    if special_key in SPECIAL_TEXT_TO_SECTION:
+        return SPECIAL_TEXT_TO_SECTION[special_key]
+
     if not raw:
         return "body_text"
 
@@ -1199,9 +1285,6 @@ def classify_section_type(paragraph):
     if any(term in lower_text for term in ("received:", "accepted:", "published:")):
         return "submission_history"
 
-    if "open access" in lower_text or "license" in lower_text or "cc by" in lower_text:
-        return "license_notice"
-
     # 8) Early short title heuristic (if early and looks like Title Case)
     if idx < 4 and len(text.split()) > 2:
         titlecase_count = sum(
@@ -1306,12 +1389,12 @@ def analyze_documents(template_file, manuscript_file):
             elif section_name.lower() == "funding statement":
                 expected_note = (
                     "Insert the highlighted funding statement heading and paragraph "
-                    "in Times New Roman 10 pt."
+                    "in Times New Roman 10 pt before the References section."
                 )
                 fix_note = (
-                    "Add a funding statement section using the default text: "
-                    "'The authors received no funding from any party for the research "
-                    "and publication of this article'."
+                    "Add a funding statement section using the default text "
+                    "before the References section: 'The authors received no funding "
+                    "from any party for the research and publication of this article'."
                 )
             return {
                 "type": "missing_section",
@@ -1330,6 +1413,10 @@ def analyze_documents(template_file, manuscript_file):
     order_issues = check_section_order(manuscript_paragraphs, template_profile)
     if order_issues:
         findings.extend(order_issues)
+
+    metadata_issues = enforce_required_journal_metadata_line(manuscript_paragraphs)
+    if metadata_issues:
+        findings.extend(metadata_issues)
 
     # Create XML previews object
     xml_previews = {
@@ -1587,19 +1674,13 @@ def get_default_formatting(section_type):
             "italic": True,
             "font_name": "Times New Roman",
         },
-        "license_notice": {
-            "font_size": 9.0,
-            "bold": False,
-            "italic": True,
-            "font_name": "Times New Roman",
-        },
         "journal_name": {
             "font_size": 24.0,
             "bold": True,
             "font_name": "Palatino Linotype",
         },
         "journal_metadata": {
-            "font_size": 12.0,
+            "font_size": 9.0,
             "bold": False,
             "font_name": "Times New Roman",
         },
@@ -1614,7 +1695,7 @@ def get_default_formatting(section_type):
         # === Headings / Sections ===
         "introduction": {
             "font_size": 10.0,
-            "bold": True,
+            "bold": False,
             "font_name": "Times New Roman",
         },
         "literature review": {
@@ -1629,7 +1710,7 @@ def get_default_formatting(section_type):
         },
         "results and discussions": {
             "font_size": 10.0,
-            "bold": True,
+            "bold": False,
             "font_name": "Times New Roman",
         },
         "conclusion": {"font_size": 10.0, "bold": True, "font_name": "Times New Roman"},
@@ -1680,7 +1761,7 @@ def get_default_formatting(section_type):
             "bold": False,
             "font_name": "Times New Roman",
         },
-        "references": {"font_size": 9.0, "bold": False, "font_name": "Times New Roman"},
+        "references": {"font_size": 10.0, "bold": False, "font_name": "Times New Roman"},
     }
 
     template = defaults.get(section_type, defaults["body_text"])
@@ -1842,6 +1923,18 @@ def check_formatting_mismatches(
                         f"Set font to '{expected['font_name']}'",
                     )
                 )
+        if paragraph.get("bold"):
+            findings.append(
+                create_finding(
+                    target_section,
+                    paragraph["index"],
+                    "bold_incorrect",
+                    "bold",
+                    "not bold",
+                    paragraph.get("text", ""),
+                    "Remove bold formatting",
+                )
+            )
         return findings  # ✅ No bold/italic checks for body text
 
     # --- 2️⃣ Bold rules ---
@@ -2045,6 +2138,40 @@ def check_section_order(manuscript_paragraphs, template_profile):
             )
 
     return findings
+
+
+def enforce_required_journal_metadata_line(manuscript_paragraphs):
+    """Ensure the journal metadata block contains the required address line."""
+    required_key = normalize_special_key(REQUIRED_JOURNAL_METADATA_LINE)
+    metadata_paragraphs = [
+        para
+        for para in manuscript_paragraphs
+        if classify_section_type(para) == "journal_metadata"
+    ]
+
+    for para in metadata_paragraphs:
+        text_key = normalize_special_key(para.get("text", ""))
+        if required_key and required_key in text_key:
+            return []
+
+    if metadata_paragraphs:
+        target_para = metadata_paragraphs[0]
+    else:
+        target_para = {"index": 0, "text": ""}
+
+    fix_note = (
+        f"Insert the line '{REQUIRED_JOURNAL_METADATA_LINE}' within the journal metadata block."
+    )
+    finding = create_finding(
+        "journal_metadata",
+        target_para.get("index", 0),
+        "journal_metadata_missing_detail",
+        "Required address line not found",
+        f"Include '{REQUIRED_JOURNAL_METADATA_LINE}'",
+        target_para.get("text", ""),
+        fix_note,
+    )
+    return [finding]
 
 
 # -------------------------
