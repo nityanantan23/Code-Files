@@ -27,7 +27,10 @@ M_NSMAP = {"m": M_NS}
 
 SPECIAL_TEXT_TO_SECTION = {}
 SPECIAL_TEXT_FORMATTING_OVERRIDES = {}
+JOURNAL_METADATA_TOKEN_SETS = []
+JOURNAL_METADATA_TOKEN_SIGNATURES = set()
 HARDCODED_SECTION_OVERRIDES = {
+    "title": {"font_size": 24.0, "bold": False},
     "journal_metadata": {"font_size": 9.0, "bold": False},
     "introduction": {"bold": False},
     "results and discussions": {"bold": False},
@@ -49,6 +52,41 @@ def normalize_special_key(text):
         return ""
     simplified = re.sub(r"\s+", "", text)
     return simplified.lower()
+
+
+def normalize_metadata_tokens(text):
+    if not text:
+        return []
+    tokens = re.findall(r"[A-Za-z0-9]+", text.lower())
+    cleaned = [re.sub(r"[^a-z0-9]", "", tok) for tok in tokens]
+    return [tok for tok in cleaned if tok]
+
+
+def register_journal_metadata_example(text):
+    tokens = normalize_metadata_tokens(text)
+    if len(tokens) < 3:
+        return
+    signature = frozenset(tokens)
+    if signature and signature not in JOURNAL_METADATA_TOKEN_SIGNATURES:
+        JOURNAL_METADATA_TOKEN_SIGNATURES.add(signature)
+        JOURNAL_METADATA_TOKEN_SETS.append(signature)
+
+
+def matches_registered_journal_metadata(text):
+    if not JOURNAL_METADATA_TOKEN_SETS:
+        return False
+    tokens = set(normalize_metadata_tokens(text))
+    if not tokens:
+        return False
+    for pattern in JOURNAL_METADATA_TOKEN_SETS:
+        overlap = len(tokens & pattern)
+        if overlap < 3:
+            continue
+        denom = max(1, min(len(pattern), len(tokens)))
+        coverage = overlap / denom
+        if coverage >= 0.5:
+            return True
+    return False
 
 
 SPECIAL_TEXT_TO_SECTION[normalize_special_key(SPECIAL_TITLE_TEXT)] = "title"
@@ -175,6 +213,14 @@ class TemplateProfile:
         # 4) Fallback to generic body text default
         if not base:
             base.update(self.rules.get("body_text", {}))
+            base = ensure_font_size_pair(base)
+
+        # 5) Guarantee core expectations from hard defaults when still missing
+        default_fmt = get_default_formatting(section_type) or {}
+        if default_fmt:
+            for key, value in default_fmt.items():
+                if key not in base or base[key] is None:
+                    base[key] = value
             base = ensure_font_size_pair(base)
 
         example, score = self.find_matching_example(
@@ -939,11 +985,15 @@ def extract_paragraph_formatting(paragraph, index, style_fonts=None, default_fon
     """Extract formatting and text from a paragraph element"""
     # Get paragraph style
     p_style = None
+    alignment = None
     pPr = paragraph.find("./w:pPr", NSMAP)
     if pPr is not None:
         pStyle = pPr.find("./w:pStyle", NSMAP)
         if pStyle is not None:
             p_style = pStyle.get("{%s}val" % W_NS)
+        jc = pPr.find("./w:jc", NSMAP)
+        if jc is not None:
+            alignment = jc.get("{%s}val" % W_NS)
 
     # Get all text runs
     texts = []
@@ -988,6 +1038,7 @@ def extract_paragraph_formatting(paragraph, index, style_fonts=None, default_fon
         "italic": dominant_format.get("italic", False),
         "runs": runs_data,
         "role_tag": role_tag,
+        "alignment": alignment,
     }
 
 
@@ -1150,6 +1201,17 @@ def classify_section_type(paragraph):
     font_size = paragraph.get("font_size") or 0
     p_style = (paragraph.get("p_style") or "").lower()
     idx = paragraph.get("index", 999)
+    raw_words = [w for w in re.split(r"\s+", text) if w]
+
+    def strip_token(token):
+        return re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9]+$", "", token)
+
+    words = [strip_token(w) or w for w in raw_words]
+    titlecase_count = sum(
+        1
+        for w in words
+        if len(w) > 2 and w[0].isupper() and (len(w) == 1 or w[1:].islower())
+    )
 
     # helper: remove leading numbering like "1.", "I.", "1.1", "1 -", "1 Introduction" etc.
     cleaned = lower_text
@@ -1224,6 +1286,36 @@ def classify_section_type(paragraph):
     if idx < 8 and any(tok in lower_text for tok in front_matter_tokens):
         return "journal_metadata"
 
+    if idx < 20:
+        if matches_registered_journal_metadata(text):
+            return "journal_metadata"
+        metadata_keywords = (
+            "department",
+            "faculty",
+            "university",
+            "institute",
+            "school",
+            "jalan",
+            "road",
+            "street",
+            "malaysia",
+            "singapore",
+            "taiwan",
+            "china",
+            "india",
+            "thailand",
+            "tel",
+            "fax",
+            "postal",
+            "address",
+        )
+        if (
+            "author" not in lower_text
+            and any(term in lower_text for term in metadata_keywords)
+            and (re.search(r"\d", text) or "," in text or ";" in text)
+        ):
+            return "journal_metadata"
+
     # 1) Paragraph style strong hints
     if p_style:
         if "subtitle" in p_style:
@@ -1256,6 +1348,23 @@ def classify_section_type(paragraph):
         if re.match(pattern, cleaned, re.IGNORECASE):
             if len(text) < 300:
                 return "table_caption"
+
+    alignment = (paragraph.get("alignment") or "").lower()
+    if idx < 8 and alignment == "center":
+        non_lower_words = sum(
+            1
+            for w in words
+            if w
+            and any(ch.isalpha() for ch in w)
+            and not w.islower()
+        )
+        if (
+            len(words) >= 4
+            and titlecase_count >= 3
+            and non_lower_words >= len(words) - 1
+            and not paragraph.get("bold")
+        ):
+            return "title"
 
     # Check explicit starts (cleaned) e.g. "introduction", or exact match, or word-boundary anywhere
     for sect, kws in section_keywords.items():
@@ -1301,12 +1410,7 @@ def classify_section_type(paragraph):
         return "submission_history"
 
     # 8) Early short title heuristic (if early and looks like Title Case)
-    if idx < 4 and len(text.split()) > 2:
-        titlecase_count = sum(
-            1
-            for w in re.split(r"\s+", text)
-            if w and len(w) > 2 and w[0].isupper() and w[1:].islower()
-        )
+    if idx < 4 and len(words) > 2:
         blocked_terms = (
             "abstract",
             "keywords",
@@ -1467,6 +1571,8 @@ def analyze_template_formatting(template_paragraphs, custom_rules=None):
     for para in template_paragraphs:
         section_type = classify_section_type(para)
         section_examples[section_type].append(para)
+        if section_type == "journal_metadata":
+            register_journal_metadata_example(para.get("text", ""))
         if section_type not in seen:
             section_order.append(section_type)
             seen.add(section_type)
