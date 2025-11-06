@@ -105,17 +105,6 @@ SPECIAL_TEXT_TO_SECTION[normalize_special_key("Web Engineering")] = "journal_nam
 # SPECIAL_TEXT_FORMATTING_OVERRIDES[
 #     normalize_special_key("Web Engineering")
 # ] = {"font_size": 18.0, "bold": True}
-SPECIAL_TEXT_TO_SECTION[
-    normalize_special_key("Journal of Informatics and Web Engineering")
-] = "journal_name"
-SPECIAL_TEXT_FORMATTING_OVERRIDES[
-    normalize_special_key("Journal of Informatics and Web Engineering")
-] = {
-    "font_size": 24.0,
-    "bold": True,
-    "italic": False,
-    "font_name": "Palatino Linotype",
-}
 
 
 def apply_special_text_overrides(section_type, paragraph_text, formatting):
@@ -212,25 +201,10 @@ class TemplateProfile:
             if normalized_context.startswith("results and discussion"):
                 base["bold"] = False
             if normalized_context.startswith("references"):
-                base["font_size"] = 10.0
+                base["font_size"] = 9.0
                 base["bold"] = False
                 if base.get("font_size_w_val") is None:
-                    hp_value = pt_to_half_points(10.0)
-                    if hp_value is not None:
-                        base["font_size_w_val"] = hp_value
-            if normalized_context.startswith(
-                (
-                    "introduction",
-                    "background",
-                    "literature review",
-                    "discussion",
-                    "conclusion",
-                )
-            ):
-                base["font_size"] = 10.0
-                base["bold"] = False
-                if base.get("font_size_w_val") is None:
-                    hp_value = pt_to_half_points(10.0)
+                    hp_value = pt_to_half_points(9.0)
                     if hp_value is not None:
                         base["font_size_w_val"] = hp_value
 
@@ -329,16 +303,6 @@ def text_similarity(a, b):
         return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
 
-CORRESPONDING_AUTHOR_MARKERS = (
-    "*corresponding author",
-    "corresponding author:",
-    "corresponding author -",
-)
-AUTHOR_LINE_MIN_TITLECASE = 2
-AUTHOR_LINE_MAX_COMMMA_GAP = 3
-AUTHOR_LINE_EMAIL_PATTERN = re.compile(r"[A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+)*\d*\*?")
-JOURNAL_NAME_TEXT = "journal of informatics and web engineering"
-TITLE_LIKE_MIN_UPPER_WORDS = 4
 
 SECTION_TO_ROLE = {
     "journal_name": "jiwe:journal-header",
@@ -1309,7 +1273,7 @@ def classify_section_type(paragraph):
         ):
             return "body_text"
 
-    if idx <= 1 and JOURNAL_NAME_TEXT in lower_text:
+    if idx <= 1 and "journal" in lower_text:
         return "journal_name"
 
     # 2) Journal / Article titles based on font size
@@ -1371,9 +1335,6 @@ def classify_section_type(paragraph):
                     return sect
             return "main_heading"
 
-    if re.match(r"^\s*[A-Z][\.\)]\s+", text):
-        return "main_heading"
-
     # 3) Figure captions
     for pattern in [r"^(figure|fig)\b", r"^(figure|fig)\s*\d+", r"^fig\.?\s*\d+"]:
         if re.match(pattern, cleaned, re.IGNORECASE):
@@ -1432,40 +1393,17 @@ def classify_section_type(paragraph):
 
     # 7) Author / corresponding hints (early in doc)
     if idx < 12:
-        if any(marker in lower_text for marker in CORRESPONDING_AUTHOR_MARKERS):
+        if "@" in raw or "correspond" in lower_text:
             return "corresponding_author"
-        if "@" in raw and "correspond" in lower_text:
-            return "corresponding_author"
-
-        if "," in raw:
-            fragments = [frag.strip() for frag in raw.split(",") if frag.strip()]
-            if fragments:
-                titlecase_tokens = sum(
-                    1
-                    for frag in fragments
-                    for token in frag.split()
-                    if token and token[0].isupper()
-                )
-                has_numeric_sup = any(re.search(r"\d+$", frag) for frag in fragments)
-                email_like = any("@" in frag for frag in fragments)
-                if (
-                    email_like
-                    and not any(
-                        term in lower_text
-                        for term in ("department", "faculty", "school", "university")
-                    )
-                ):
-                    return "corresponding_author"
-                if (
-                    titlecase_tokens >= AUTHOR_LINE_MIN_TITLECASE
-                    and has_numeric_sup
-                    and not any(
-                        term in lower_text
-                        for term in ("department", "faculty", "school", "university")
-                    )
-                ):
-                    return "authors"
-            if AUTHOR_LINE_EMAIL_PATTERN.search(raw):
+        # name-like line with commas and TitleCase tokens
+        if "," in raw and not any(
+            term in lower_text
+            for term in ("department", "faculty", "school", "university")
+        ):
+            name_like = (
+                len(re.findall(r"\b[A-Z][a-z]{1,}\s+[A-Z][a-z]{1,}\b", raw)) >= 1
+            )
+            if name_like:
                 return "authors"
 
     if any(term in lower_text for term in ("received:", "accepted:", "published:")):
@@ -1837,7 +1775,7 @@ def get_default_formatting(section_type):
     """Get default formatting rules as fallback"""
     defaults = {
         # === Titles ===
-        "title": {"font_size": 24.0, "bold": True, "font_name": "Times New Roman"},
+        "title": {"font_size": 24.0, "bold": False, "font_name": "Times New Roman"},
         "subtitle": {"font_size": 16.0, "bold": False, "font_name": "Times New Roman"},
         # === Author Info ===
         "authors": {"font_size": 11.0, "bold": True, "font_name": "Times New Roman"},
@@ -1862,7 +1800,6 @@ def get_default_formatting(section_type):
             "font_size": 24.0,
             "bold": True,
             "font_name": "Palatino Linotype",
-            "italic": False,
         },
         "journal_metadata": {
             "font_size": 9.0,
@@ -2165,49 +2102,37 @@ def check_formatting_mismatches(
         )
 
     # --- 3️⃣ Italic rules ---
-    enumerated_heading = False
-    if section_type == "main_heading":
-        enumerated_heading = bool(
-            re.match(
-                r"^\s*(?:\(?\d+[\)\.]|\(?[A-Za-z][\)\.]|[ivxlcdm]+[\)\.])\s+",
-                paragraph["text"].strip(),
-                re.IGNORECASE,
+    if section_type in ["keywords", "corresponding_author"]:
+        # These MUST be italic
+        if not actual_italic:
+            findings.append(
+                create_finding(
+                    target_section,
+                    paragraph["index"],
+                    "italic_missing",
+                    "not italic",
+                    "italic",
+                    paragraph["text"],
+                    "Set to italic",
+                )
             )
-        )
-
-    italic_required = section_type in ["keywords", "corresponding_author"] or enumerated_heading
-    italic_forbidden = (
-        not italic_required
-        and (
-            (section_type in header_must_not_be_bold and section_type != "main_heading")
-            or section_type in ["title", "references"]
-        )
-    )
-
-    if italic_required and not actual_italic:
-        findings.append(
-            create_finding(
-                target_section,
-                paragraph["index"],
-                "italic_missing",
-                "not italic",
-                "italic",
-                paragraph["text"],
-                "Set to italic",
+    elif section_type in header_must_not_be_bold or section_type in [
+        "title",
+        "references",
+    ]:
+        # These must NOT be italic
+        if actual_italic:
+            findings.append(
+                create_finding(
+                    target_section,
+                    paragraph["index"],
+                    "italic_incorrect",
+                    "italic",
+                    "not italic",
+                    paragraph["text"],
+                    "Remove italic formatting",
+                )
             )
-        )
-    elif italic_forbidden and actual_italic:
-        findings.append(
-            create_finding(
-                target_section,
-                paragraph["index"],
-                "italic_incorrect",
-                "italic",
-                "not italic",
-                paragraph["text"],
-                "Remove italic formatting",
-            )
-        )
 
     # --- 4️⃣ Font size & family checks (same as before) ---
     font_size_issue = build_font_size_mismatch_finding(
